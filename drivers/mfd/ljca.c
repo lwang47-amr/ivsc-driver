@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2021, Intel Corporation.
  */
-
+#define DEBUG 1
 #include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/mfd/core.h>
@@ -18,37 +18,10 @@
 #include <linux/usb.h>
 #include <linux/version.h>
 
-enum ljca_acpi_match_adr {
-	LJCA_ACPI_MATCH_GPIO,
-	LJCA_ACPI_MATCH_I2C1,
-	LJCA_ACPI_MATCH_I2C2,
-	LJCA_ACPI_MATCH_SPI1,
-};
-
-static char *gpio_hids[] = {
-	"INTC1074", /* TGL */
-	"INTC1096", /* ADL */
-	"INTC100B", /* RPL */
-	"INTC10D1", /* MTL */
-	"INTC10B5", /* LNL */
-};
+/* Cell acpi devices cannot be NULL */
 static struct mfd_cell_acpi_match ljca_acpi_match_gpio;
-
-static char *i2c_hids[] = {
-	"INTC1075", /* TGL */
-	"INTC1097", /* ADL */
-	"INTC100C", /* RPL */
-	"INTC10D2", /* MTL */
-};
-static struct mfd_cell_acpi_match ljca_acpi_match_i2cs[2];
-
-static char *spi_hids[] = {
-	"INTC1091", /* TGL */
-	"INTC1098", /* ADL */
-	"INTC100D", /* RPL */
-	"INTC10D3", /* MTL */
-};
-static struct mfd_cell_acpi_match ljca_acpi_match_spis[1];
+static struct mfd_cell_acpi_match ljca_acpi_match_i2cs;
+static struct mfd_cell_acpi_match ljca_acpi_match_spis;
 
 struct ljca_msg {
 	u8 type;
@@ -215,126 +188,24 @@ struct ljca_dev {
 /* parent of sub-devices */
 struct device *sub_dev_parent;
 struct device *cur_dev;
+struct ljca_dev *ljca_bridge;
 
-static int try_match_acpi_hid(struct acpi_device *child, char **hids, int hids_num)
+static void ljca_dump(struct ljca_dev *ljca, void *buf, int len)
 {
-	struct acpi_device_id ids[2] = {};
-	int i;
-
-	for (i = 0; i < hids_num; i++) {
-		strscpy(ids[0].id, hids[i], sizeof(ids[0].id));
-		if (!acpi_match_device_ids(child, ids))
-			return i;
-	}
-
-	return -ENODEV;
+	int i, n=0;
+	u8 tmp[256] = { 0 };
+	
+	for (i = 0; i < len; i++)
+		n += scnprintf(tmp + n, sizeof(tmp) - n - 1, "%02x ", ((u8 *)buf)[i]);
+	dev_dbg(&ljca->intf->dev, "%s\n", tmp);
 }
 
-static int match_device_ids(struct acpi_device *adev, void *data)
-{
-	int ret;
-	int *child_count = data;
-
-	dev_dbg(&adev->dev, "adev->dep_unmet %d %d\n", adev->dep_unmet, *child_count);
-
-	/* dependency not ready */
-	if (adev->dep_unmet)
-		return -ENODEV;
-
-	ret = try_match_acpi_hid(adev, gpio_hids, ARRAY_SIZE(gpio_hids));
-	if (ret >= 0 && ret < ARRAY_SIZE(gpio_hids)) {
-		ljca_acpi_match_gpio.pnpid = gpio_hids[ret];
-		(*child_count)++;
-		return 0;
-	}
-
-	ret = try_match_acpi_hid(adev, i2c_hids, ARRAY_SIZE(i2c_hids));
-	if (ret >= 0 && ret < ARRAY_SIZE(i2c_hids)) {
-		ljca_acpi_match_i2cs[0].pnpid = i2c_hids[ret];
-		ljca_acpi_match_i2cs[1].pnpid = i2c_hids[ret];
-		(*child_count)++;
-		return 0;
-	}
-
-	ret = try_match_acpi_hid(adev, spi_hids, ARRAY_SIZE(spi_hids));
-	if (ret >= 0 && ret < ARRAY_SIZE(spi_hids)) {
-		ljca_acpi_match_spis[0].pnpid = spi_hids[ret];
-		(*child_count)++;
-		return 0;
-	}
-
-	return 0;
-}
-
-static int precheck_acpi_hid(struct usb_interface *intf)
-{
-	struct device *parents[2];
-	struct acpi_device *adev;
-	int i;
-	int child_count;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
-	struct acpi_device *child;
-#endif
-
-	parents[0] = &intf->dev;
-	parents[1] = intf->dev.parent->parent;
-	if (!parents[0] || !parents[1])
-		return -ENODEV;
-
-	adev = ACPI_COMPANION(parents[0]);
-	if (!adev)
-		return -ENODEV;
-
-	acpi_dev_clear_dependencies(adev);
-	sub_dev_parent = parents[0];
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-	for (i = 0; i < ARRAY_SIZE(parents); i++) {
-		child_count = 0;
-		acpi_dev_for_each_child(ACPI_COMPANION(parents[i]), match_device_ids, &child_count);
-		if (child_count > 0) {
-			sub_dev_parent = parents[i];
-			break;
-		}
-	}
-#else
-	for (i = 0; i < ARRAY_SIZE(parents); i++) {
-		child_count = 0;
-		list_for_each_entry(child, &(ACPI_COMPANION(parents[i])->children), node) {
-			match_device_ids(child, &child_count);
-		}
-
-		if (child_count > 0) {
-			sub_dev_parent = parents[i];
-			break;
-		}
-	}
-#endif
-
-	return 0;
-}
 
 static bool ljca_validate(void *data, u32 data_len)
 {
 	struct ljca_msg *header = (struct ljca_msg *)data;
 
 	return (header->len + sizeof(*header) == data_len);
-}
-
-static void ljca_dump(struct ljca_dev *ljca, void *buf, int len)
-{
-	int i;
-	u8 tmp[256] = { 0 };
-	int n = 0;
-
-	if (!len)
-		return;
-
-	for (i = 0; i < len; i++)
-		n += scnprintf(tmp + n, sizeof(tmp) - n - 1, "%02x ",
-			       ((u8 *)buf)[i]);
-
-	dev_dbg(&ljca->intf->dev, "%s\n", tmp);
 }
 
 static struct ljca_stub *ljca_stub_alloc(struct ljca_dev *ljca, int priv_size)
@@ -480,42 +351,82 @@ error:
 	return ret;
 }
 
-static int ljca_transfer_internal(struct platform_device *pdev, u8 cmd,
+static int ljca_transfer_internal(struct usb_device *dev, u8 type, u8 cmd,
 				  const void *obuf, int obuf_len, void *ibuf,
 				  int *ibuf_len, bool wait_ack)
 {
-	struct ljca_platform_data *ljca_pdata;
-	struct ljca_dev *ljca;
 	struct ljca_stub *stub;
 
-	if (!pdev)
+	if (!type) {
+		dev_err(&ljca_bridge->intf->dev, "Invalid stub type");
 		return -EINVAL;
+	}
 
-	ljca = dev_get_drvdata(cur_dev);
-	ljca_pdata = dev_get_platdata(&pdev->dev);
-	stub = ljca_stub_find(ljca, ljca_pdata->type);
-	if (IS_ERR(stub))
+	if (dev != ljca_bridge->udev) {
+		dev_err(&ljca_bridge->intf->dev, "dev %p isn't for this bridge", dev);
+		return -EINVAL;
+	}
+
+	stub = ljca_stub_find(ljca_bridge, type);
+	if (IS_ERR(stub)) {
+		dev_err(&ljca_bridge->intf->dev, "dev %p cannot find stub, type %x", dev, type);
 		return PTR_ERR(stub);
+	}
 
 	return ljca_stub_write(stub, cmd, obuf, obuf_len, ibuf, ibuf_len,
 			       wait_ack, USB_WRITE_ACK_TIMEOUT);
 }
 
-int ljca_transfer(struct platform_device *pdev, u8 cmd, const void *obuf,
+int ljca_transfer(struct usb_device *dev, u8 type, u8 cmd, const void *obuf,
 		  int obuf_len, void *ibuf, int *ibuf_len)
 {
-	return ljca_transfer_internal(pdev, cmd, obuf, obuf_len, ibuf, ibuf_len,
+	return ljca_transfer_internal(dev, type, cmd, obuf, obuf_len, ibuf, ibuf_len,
 				      true);
 }
 EXPORT_SYMBOL_GPL(ljca_transfer);
 
-int ljca_transfer_noack(struct platform_device *pdev, u8 cmd, const void *obuf,
+int ljca_transfer_noack(struct usb_device *dev, u8 type, u8 cmd, const void *obuf,
 			int obuf_len)
 {
-	return ljca_transfer_internal(pdev, cmd, obuf, obuf_len, NULL, NULL,
+	return ljca_transfer_internal(dev, type, cmd, obuf, obuf_len, NULL, NULL,
 				      false);
 }
 EXPORT_SYMBOL_GPL(ljca_transfer_noack);
+
+
+struct usb_device *ljca_get_udev(void)
+{
+	if (ljca_bridge)
+		return ljca_bridge->udev;
+	else
+		return NULL;
+}
+EXPORT_SYMBOL_GPL(ljca_get_udev);
+
+u8 ljca_get_stub_type(const char *cell_name)
+{
+	if (sysfs_streq(cell_name, CELL_GPIO))
+		return GPIO_STUB;
+
+	if (sysfs_streq(cell_name, CELL_I2C))
+		return I2C_STUB;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ljca_get_stub_type);
+
+struct ljca_platform_data *ljca_get_cell_pdata(const char *cell_name)
+{
+	int i;
+
+	for (i=0; i < ljca_bridge->cell_count; i++) {
+		if (sysfs_streq(ljca_bridge->cells[i].name, cell_name))
+			return ljca_bridge->cells[i].platform_data;
+	}
+	return NULL;
+
+}
+EXPORT_SYMBOL_GPL(ljca_get_cell_pdata);
 
 int ljca_register_event_cb(struct platform_device *pdev,
 			   ljca_event_cb_t event_cb)
@@ -528,9 +439,15 @@ int ljca_register_event_cb(struct platform_device *pdev,
 	if (!pdev)
 		return -EINVAL;
 
+	printk("aaa\n");
 	ljca = dev_get_drvdata(cur_dev);
+	printk("bbb\n");
+	printk("bbb pdev %p\n", pdev);
+	printk("bbb pdev->dev %p\n", &pdev->dev);
 	ljca_pdata = dev_get_platdata(&pdev->dev);
+	printk("ccc type %x\n", ljca_pdata->type);
 	stub = ljca_stub_find(ljca, ljca_pdata->type);
+	printk("ccc stub %p\n", stub);
 	if (IS_ERR(stub))
 		return PTR_ERR(stub);
 
@@ -538,6 +455,7 @@ int ljca_register_event_cb(struct platform_device *pdev,
 	stub->event_entry.notify = event_cb;
 	stub->event_entry.pdev = pdev;
 	spin_unlock_irqrestore(&stub->event_cb_lock, flags);
+	printk("ddd\n");
 
 	return 0;
 }
@@ -723,7 +641,7 @@ static int ljca_gpio_stub_init(struct ljca_dev *ljca,
 
 	bitmap_from_arr32(pdata->gpio_info.valid_pin_map, valid_pin, gpio_num);
 
-	cell.name = "ljca-gpio";
+	cell.name = CELL_GPIO;
 	cell.platform_data = pdata;
 	cell.pdata_size = sizeof(*pdata);
 	cell.acpi_match = &ljca_acpi_match_gpio;
@@ -782,11 +700,10 @@ static int ljca_i2c_stub_init(struct ljca_dev *ljca,
 		pdata[i].i2c_info.capacity = desc->info[i].capacity;
 		pdata[i].i2c_info.intr_pin = desc->info[i].intr_pin;
 
-		cell.name = "ljca-i2c";
+		cell.name = CELL_I2C;
 		cell.platform_data = &pdata[i];
 		cell.pdata_size = sizeof(pdata[i]);
-		if (i < ARRAY_SIZE(ljca_acpi_match_i2cs))
-			cell.acpi_match = &ljca_acpi_match_i2cs[i];
+		cell.acpi_match = &ljca_acpi_match_i2cs;
 
 		ret = ljca_add_mfd_cell(ljca, &cell);
 		if (ret)
@@ -845,11 +762,10 @@ static int ljca_spi_stub_init(struct ljca_dev *ljca,
 		pdata[i].spi_info.id = desc->info[i].id;
 		pdata[i].spi_info.capacity = desc->info[i].capacity;
 
-		cell.name = "ljca-spi";
+		cell.name = CELL_SPI; 
 		cell.platform_data = &pdata[i];
 		cell.pdata_size = sizeof(pdata[i]);
-		if (i < ARRAY_SIZE(ljca_acpi_match_spis))
-			cell.acpi_match = &ljca_acpi_match_spis[i];
+		cell.acpi_match =  &ljca_acpi_match_spis;
 
 		ret = ljca_add_mfd_cell(ljca, &cell);
 		if (ret)
@@ -1117,10 +1033,8 @@ static int ljca_probe(struct usb_interface *intf,
 	int ret;
 
 	cur_dev = &intf->dev;
-	ret = precheck_acpi_hid(intf);
-	if (ret)
-		return ret;
 
+	printk("--- ljca_probe!!! ---\n");
 	/* allocate memory for our device state and initialize it */
 	ljca = kzalloc(sizeof(*ljca), GFP_KERNEL);
 	if (!ljca)
@@ -1177,16 +1091,10 @@ static int ljca_probe(struct usb_interface *intf,
 		goto error_stop;
 	}
 
-	ret = mfd_add_hotplug_devices(sub_dev_parent, ljca->cells,
-				      ljca->cell_count);
-	if (ret) {
-		dev_err(&intf->dev, "failed to add mfd devices to core %d\n",
-			ljca->cell_count);
-		goto error_stop;
-	}
-
 	ljca->state = LJCA_STARTED;
-	dev_info(&intf->dev, "LJCA USB device init success\n");
+	ljca_bridge = ljca;
+	dev_info(&intf->dev, "NEW LJCA device init success\n");
+	printk("--- ljca_probe done!!! ---\n");
 	return 0;
 error_stop:
 	ljca_stop(ljca);
@@ -1206,7 +1114,7 @@ static void ljca_disconnect(struct usb_interface *intf)
 
 	ljca_stop(ljca);
 	ljca->state = LJCA_STOPPED;
-	mfd_remove_devices(sub_dev_parent);
+	// mfd_remove_devices(sub_dev_parent); // Lifu
 	ljca_stub_cleanup(ljca);
 	usb_set_intfdata(intf, NULL);
 	ljca_delete(ljca);
@@ -1217,6 +1125,7 @@ static int ljca_suspend(struct usb_interface *intf, pm_message_t message)
 {
 	struct ljca_dev *ljca = usb_get_intfdata(intf);
 
+	printk("*** ljca_suspend ***\n");
 	ljca_stop(ljca);
 	ljca->state = LJCA_SUSPEND;
 
@@ -1226,6 +1135,7 @@ static int ljca_suspend(struct usb_interface *intf, pm_message_t message)
 
 static int ljca_resume(struct usb_interface *intf)
 {
+	printk(">>> XXX ljca_resume XXXX\n");
 	struct ljca_dev *ljca = usb_get_intfdata(intf);
 
 	ljca->state = LJCA_STARTED;

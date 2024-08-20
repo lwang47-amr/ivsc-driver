@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2021, Intel Corporation.
  */
-
+#define DEBUG 1
 #include <linux/acpi.h>
 #include <linux/gpio/driver.h>
 #include <linux/irq.h>
@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/bitops.h>
+#include <linux/usb.h>
 
 #define GPIO_PAYLOAD_LEN(pin_num)                                              \
 	(sizeof(struct gpio_packet) + (pin_num) * sizeof(struct gpio_op))
@@ -43,6 +44,8 @@
 /* Intentional overlap with PULLUP / PULLDOWN */
 #define GPIO_CONF_SET BIT(3)
 #define GPIO_CONF_CLR BIT(4)
+
+#define IRQ_SUPPORT 0
 
 struct gpio_op {
 	u8 index;
@@ -85,7 +88,12 @@ static bool ljca_gpio_valid(struct ljca_gpio_dev *ljca_gpio, int gpio_id)
 static int gpio_config(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id, u8 config)
 {
 	struct gpio_packet *packet = (struct gpio_packet *)ljca_gpio->obuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_GPIO);
 	int ret;
+
+	if (!dev) 
+		return -EINVAL;
 
 	if (!ljca_gpio_valid(ljca_gpio, gpio_id))
 		return -EINVAL;
@@ -95,7 +103,7 @@ static int gpio_config(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id, u8 config)
 	packet->item[0].value = config | ljca_gpio->connect_mode[gpio_id];
 	packet->num = 1;
 
-	ret = ljca_transfer(ljca_gpio->pdev, GPIO_CONFIG, packet,
+	ret = ljca_transfer(dev, type, GPIO_CONFIG, packet,
 			    GPIO_PAYLOAD_LEN(packet->num), NULL, NULL);
 	mutex_unlock(&ljca_gpio->trans_lock);
 	return ret;
@@ -105,8 +113,13 @@ static int ljca_gpio_read(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id)
 {
 	struct gpio_packet *packet = (struct gpio_packet *)ljca_gpio->obuf;
 	struct gpio_packet *ack_packet;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_GPIO);
 	int ret;
 	int ibuf_len;
+
+	if (!dev)
+		return -EINVAL;
 
 	if (!ljca_gpio_valid(ljca_gpio, gpio_id))
 		return -EINVAL;
@@ -114,7 +127,7 @@ static int ljca_gpio_read(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id)
 	mutex_lock(&ljca_gpio->trans_lock);
 	packet->num = 1;
 	packet->item[0].index = gpio_id;
-	ret = ljca_transfer(ljca_gpio->pdev, GPIO_READ, packet,
+	ret = ljca_transfer(dev, type, GPIO_READ, packet,
 			    GPIO_PAYLOAD_LEN(packet->num), ljca_gpio->ibuf,
 			    &ibuf_len);
 
@@ -134,6 +147,8 @@ static int ljca_gpio_write(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id,
 			   int value)
 {
 	struct gpio_packet *packet = (struct gpio_packet *)ljca_gpio->obuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_GPIO);
 	int ret;
 
 	mutex_lock(&ljca_gpio->trans_lock);
@@ -141,7 +156,7 @@ static int ljca_gpio_write(struct ljca_gpio_dev *ljca_gpio, u8 gpio_id,
 	packet->item[0].index = gpio_id;
 	packet->item[0].value = (value & 1);
 
-	ret = ljca_transfer(ljca_gpio->pdev, GPIO_WRITE, packet,
+	ret = ljca_transfer(dev, type, GPIO_WRITE, packet,
 			    GPIO_PAYLOAD_LEN(packet->num), NULL, NULL);
 	mutex_unlock(&ljca_gpio->trans_lock);
 	return ret;
@@ -217,11 +232,17 @@ static int ljca_gpio_set_config(struct gpio_chip *chip, unsigned int offset,
 	return 0;
 }
 
+#if IRQ_SUPPORT
 static int ljca_enable_irq(struct ljca_gpio_dev *ljca_gpio, int gpio_id,
 			   bool enable)
 {
 	struct gpio_packet *packet = (struct gpio_packet *)ljca_gpio->obuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_GPIO);
 	int ret;
+
+	if (!dev)
+		return -EINVAL;
 
 	mutex_lock(&ljca_gpio->trans_lock);
 	packet->num = 1;
@@ -230,7 +251,7 @@ static int ljca_enable_irq(struct ljca_gpio_dev *ljca_gpio, int gpio_id,
 
 	dev_dbg(ljca_gpio->gc.parent, "%s %d", __func__, gpio_id);
 
-	ret = ljca_transfer(ljca_gpio->pdev,
+	ret = ljca_transfer(dev, type,
 			    enable == true ? GPIO_INT_UNMASK : GPIO_INT_MASK,
 			    packet, GPIO_PAYLOAD_LEN(packet->num), NULL, NULL);
 	mutex_unlock(&ljca_gpio->trans_lock);
@@ -399,16 +420,27 @@ static struct irq_chip ljca_gpio_irqchip = {
 	.irq_startup = ljca_irq_startup,
 	.irq_shutdown = ljca_irq_shutdown,
 };
+#endif
 
 static int ljca_gpio_probe(struct platform_device *pdev)
 {
 	struct ljca_gpio_dev *ljca_gpio;
-	struct ljca_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct ljca_platform_data *pdata;
+#if IRQ_SUPPORT
 	struct gpio_irq_chip *girq;
+#endif
 
+	printk("XXXX ljca_gpio_probe !!! XXXX\n");
 	ljca_gpio = devm_kzalloc(&pdev->dev, sizeof(*ljca_gpio), GFP_KERNEL);
 	if (!ljca_gpio)
 		return -ENOMEM;
+
+	pdata = ljca_get_cell_pdata(CELL_GPIO);
+	if (!pdata) {
+		dev_err(&pdev->dev, "%s cannot get usbio-gpio cell data", __func__);
+		return -ENODATA;
+	}
+	printk("%s: pdata %p\n", __func__, pdata);
 
 	ljca_gpio->ctr_info = &pdata->gpio_info;
 	ljca_gpio->connect_mode =
@@ -430,14 +462,17 @@ static int ljca_gpio_probe(struct platform_device *pdev)
 
 	ljca_gpio->gc.base = -1;
 	ljca_gpio->gc.ngpio = ljca_gpio->ctr_info->num;
+	printk("111\n"); 
 	ljca_gpio->gc.label = ACPI_COMPANION(&pdev->dev) ?
 			      acpi_dev_name(ACPI_COMPANION(&pdev->dev)) :
 			      "ljca-gpio";
 	ljca_gpio->gc.owner = THIS_MODULE;
 
+	printk("222\n"); 
 	platform_set_drvdata(pdev, ljca_gpio);
+#if IRQ_SUPPORT
 	ljca_register_event_cb(pdev, ljca_gpio_event_cb);
-
+	printk("333\n");
 	girq = &ljca_gpio->gc.irq;
 	girq->chip = &ljca_gpio_irqchip;
 	girq->parent_handler = NULL;
@@ -446,7 +481,10 @@ static int ljca_gpio_probe(struct platform_device *pdev)
 	girq->default_type = IRQ_TYPE_NONE;
 	girq->handler = handle_simple_irq;
 
+	printk("About to complete gpio_probe\n");
 	INIT_WORK(&ljca_gpio->work, ljca_gpio_async);
+	printk("Almost complete gpio_probe\n");
+#endif
 	return devm_gpiochip_add_data(&pdev->dev, &ljca_gpio->gc, ljca_gpio);
 }
 
@@ -455,14 +493,27 @@ static int ljca_gpio_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static struct acpi_device_id gpio_ids[] = {
+	{ "INTC10D1" }, /* MTL-CVF */
+	{ "INTC1007" }, /* MTL */
+	{ "INTC10B5" }, /* LNL */
+	{ "INTC10B2" }, /* ARL */
+	{},
+};
+
 static struct platform_driver ljca_gpio_driver = {
-	.driver.name = "ljca-gpio",
+	.driver = {
+		.name = "ljca-gpio",
+		.owner = THIS_MODULE,
+		.acpi_match_table = ACPI_PTR(gpio_ids),
+	},
 	.probe = ljca_gpio_probe,
 	.remove = ljca_gpio_remove,
 };
 
 module_platform_driver(ljca_gpio_driver);
 
+MODULE_AUTHOR("Lifu Wang <lifu.wang@intel.com>");
 MODULE_AUTHOR("Ye Xiang <xiang.ye@intel.com>");
 MODULE_AUTHOR("Zhang Lixu <lixu.zhang@intel.com>");
 MODULE_DESCRIPTION("Intel La Jolla Cove Adapter USB-GPIO driver");

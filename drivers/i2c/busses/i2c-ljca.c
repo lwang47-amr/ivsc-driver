@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/version.h>
+#include <linux/usb.h>
 
 /* I2C commands */
 enum i2c_cmd {
@@ -93,13 +94,15 @@ static u8 ljca_i2c_format_slave_addr(u8 slave_addr, enum i2c_address_mode mode)
 static int ljca_i2c_init(struct ljca_i2c_dev *ljca_i2c, u8 id)
 {
 	struct i2c_rw_packet *w_packet = (struct i2c_rw_packet *)ljca_i2c->obuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_I2C);
 
 	memset(w_packet, 0, sizeof(*w_packet));
 	w_packet->id = id;
 	w_packet->len = cpu_to_le16(1);
 	w_packet->data[0] = I2C_FLAG_FREQ_400K;
 
-	return ljca_transfer(ljca_i2c->pdev, I2C_INIT, w_packet,
+	return ljca_transfer(dev, type, I2C_INIT, w_packet,
 			     sizeof(*w_packet) + 1, NULL, NULL);
 }
 
@@ -108,8 +111,13 @@ static int ljca_i2c_start(struct ljca_i2c_dev *ljca_i2c, u8 slave_addr,
 {
 	struct i2c_rw_packet *w_packet = (struct i2c_rw_packet *)ljca_i2c->obuf;
 	struct i2c_rw_packet *r_packet = (struct i2c_rw_packet *)ljca_i2c->ibuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type_stub = ljca_get_stub_type(CELL_I2C);
 	int ret;
 	int ibuf_len;
+
+	if (!dev)
+		return -EINVAL;
 
 	memset(w_packet, 0, sizeof(*w_packet));
 	w_packet->id = ljca_i2c->ctr_info->id;
@@ -120,7 +128,7 @@ static int ljca_i2c_start(struct ljca_i2c_dev *ljca_i2c, u8 slave_addr,
 					   I2C_SLAVE_TRANSFER_READ :
 					   I2C_SLAVE_TRANSFER_WRITE;
 
-	ret = ljca_transfer(ljca_i2c->pdev, I2C_START, w_packet,
+	ret = ljca_transfer(dev, type_stub, I2C_START, w_packet,
 			    sizeof(*w_packet) + 1, r_packet, &ibuf_len);
 
 	if (ret || ibuf_len < sizeof(*r_packet))
@@ -142,6 +150,8 @@ static int ljca_i2c_stop(struct ljca_i2c_dev *ljca_i2c, u8 slave_addr)
 {
 	struct i2c_rw_packet *w_packet = (struct i2c_rw_packet *)ljca_i2c->obuf;
 	struct i2c_rw_packet *r_packet = (struct i2c_rw_packet *)ljca_i2c->ibuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_I2C);
 	int ret;
 	int ibuf_len;
 
@@ -150,7 +160,7 @@ static int ljca_i2c_stop(struct ljca_i2c_dev *ljca_i2c, u8 slave_addr)
 	w_packet->len = cpu_to_le16(1);
 	w_packet->data[0] = 0;
 
-	ret = ljca_transfer(ljca_i2c->pdev, I2C_STOP, w_packet,
+	ret = ljca_transfer(dev, type, I2C_STOP, w_packet,
 			    sizeof(*w_packet) + 1, r_packet, &ibuf_len);
 
 	if (ret || ibuf_len < sizeof(*r_packet))
@@ -172,8 +182,13 @@ static int ljca_i2c_pure_read(struct ljca_i2c_dev *ljca_i2c, u8 *data, int len)
 {
 	struct i2c_rw_packet *w_packet = (struct i2c_rw_packet *)ljca_i2c->obuf;
 	struct i2c_rw_packet *r_packet = (struct i2c_rw_packet *)ljca_i2c->ibuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_I2C);
 	int ibuf_len;
 	int ret;
+
+	if (!dev)
+		return -EINVAL;
 
 	if (len > LJCA_I2C_MAX_XFER_SIZE)
 		return -EINVAL;
@@ -181,7 +196,7 @@ static int ljca_i2c_pure_read(struct ljca_i2c_dev *ljca_i2c, u8 *data, int len)
 	memset(w_packet, 0, sizeof(*w_packet));
 	w_packet->id = ljca_i2c->ctr_info->id;
 	w_packet->len = cpu_to_le16(len);
-	ret = ljca_transfer(ljca_i2c->pdev, I2C_READ, w_packet,
+	ret = ljca_transfer(dev, type, I2C_READ, w_packet,
 			    sizeof(*w_packet) + 1, r_packet, &ibuf_len);
 	if (ret) {
 		dev_err(&ljca_i2c->adap.dev, "I2C_READ failed ret:%d\n", ret);
@@ -229,8 +244,13 @@ static int ljca_i2c_pure_write(struct ljca_i2c_dev *ljca_i2c, u8 *data, u8 len)
 {
 	struct i2c_rw_packet *w_packet = (struct i2c_rw_packet *)ljca_i2c->obuf;
 	struct i2c_rw_packet *r_packet = (struct i2c_rw_packet *)ljca_i2c->ibuf;
+	struct usb_device *dev = ljca_get_udev();
+	u8 type = ljca_get_stub_type(CELL_I2C);
 	int ret;
 	int ibuf_len;
+
+	if (!dev)
+		return -EINVAL;
 
 	if (len > LJCA_I2C_MAX_XFER_SIZE)
 		return -EINVAL;
@@ -240,7 +260,7 @@ static int ljca_i2c_pure_write(struct ljca_i2c_dev *ljca_i2c, u8 *data, u8 len)
 	w_packet->len = cpu_to_le16(len);
 	memcpy(w_packet->data, data, len);
 
-	ret = ljca_transfer(ljca_i2c->pdev, I2C_WRITE, w_packet,
+	ret = ljca_transfer(dev, type, I2C_WRITE, w_packet,
 			    sizeof(*w_packet) + w_packet->len, r_packet,
 			    &ibuf_len);
 
@@ -395,13 +415,19 @@ static void try_bind_acpi(struct platform_device *pdev,
 static int ljca_i2c_probe(struct platform_device *pdev)
 {
 	struct ljca_i2c_dev *ljca_i2c;
-	struct ljca_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct ljca_platform_data *pdata; 
 	int ret;
 
 	ljca_i2c = devm_kzalloc(&pdev->dev, sizeof(*ljca_i2c), GFP_KERNEL);
 	if (!ljca_i2c)
 		return -ENOMEM;
 
+	pdata = ljca_get_cell_pdata(CELL_I2C);
+	if (!pdata) {
+		dev_err(&pdev->dev, "%s cannot get ljca-i2c cell data", __func__);
+		return -ENODATA;
+	}
+	
 	ljca_i2c->pdev = pdev;
 	ljca_i2c->ctr_info = &pdata->i2c_info;
 
@@ -448,14 +474,27 @@ static int ljca_i2c_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static struct acpi_device_id i2c_ids[] = {
+        { "INTC10D1" }, // MTL
+	{ "INTC1008" }, // MTL
+        { "INTC10B6" }, // LNL
+	{ "INTC10E3" }, // PNL
+        {},
+};
+
 static struct platform_driver ljca_i2c_driver = {
-	.driver.name = "ljca-i2c",
+	.driver = {
+		.name = "ljca-i2c",
+		.owner = THIS_MODULE,
+		.acpi_match_table = ACPI_PTR(i2c_ids),
+	},
 	.probe = ljca_i2c_probe,
 	.remove = ljca_i2c_remove,
 };
 
 module_platform_driver(ljca_i2c_driver);
 
+MODULE_AUTHOR("Lifu Wang <lifu.wang@intel.com>");
 MODULE_AUTHOR("Ye Xiang <xiang.ye@intel.com>");
 MODULE_AUTHOR("Zhang Lixu <lixu.zhang@intel.com>");
 MODULE_DESCRIPTION("Intel La Jolla Cove Adapter USB-I2C driver");
